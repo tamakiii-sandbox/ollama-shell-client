@@ -1,10 +1,12 @@
+use anyhow::{Context, Result};
 use futures_util::stream::StreamExt;
-use reqwest::{Client, Error, Response};
+use reqwest::{Client, Response};
 use serde_json::Value;
+use std::io::Write;
 use std::str;
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
     let client = Client::new();
     let response = client
         .post("http://localhost:11434/api/generate")
@@ -24,37 +26,24 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn handle_stream(response: Response) -> Result<(), Error> {
+async fn handle_stream(response: Response) -> Result<()> {
     let mut stream = response.bytes_stream();
-    let mut complete_response = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let text_chunk = process_chunk(chunk).unwrap();
-        if let Some(text) = text_chunk {
-            complete_response.push_str(&text);
-        } else {
-            break;
+        let bytes = chunk?;
+        let text = str::from_utf8(&bytes)
+            .with_context(|| format!("Failed to convert bytes to UTF-8 string: {:?}", bytes))?;
+        let json: Value = serde_json::from_str(text)
+            .with_context(|| format!("Failed to parse JSON from string: {}", text))?;
+        if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
+            break; // Indicate completion of the stream
+        }
+        if let Some(response_text) = json["response"].as_str() {
+            print!("{}", response_text);
+            std::io::stdout().flush().unwrap();
         }
     }
 
-    println!("Final Response: {}", complete_response);
+    println!(); // Add a newline after the last chunk
     Ok(())
-}
-
-/// Processes a single chunk of the response stream, returns the text to append,
-/// or None if the stream is complete.
-fn process_chunk(
-    chunk: Result<bytes::Bytes, Error>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    match chunk {
-        Ok(bytes) => {
-            let text = str::from_utf8(&bytes)?;
-            let json: Value = serde_json::from_str(text)?;
-            if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
-                return Ok(None); // Indicate completion of the stream
-            }
-            Ok(Some(json["response"].as_str().unwrap_or("").to_string()))
-        }
-        Err(e) => Err(Box::new(e)),
-    }
 }
