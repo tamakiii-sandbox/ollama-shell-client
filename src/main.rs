@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::stream::StreamExt;
 use reqwest::{Client, Response};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::fs::File;
 use std::io::Write;
 use std::str;
 
@@ -14,6 +15,23 @@ struct Cli {
     command: Option<Commands>,
 }
 
+/// Supported system types
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum System {
+    Base,
+    Enhanced,
+}
+
+impl std::fmt::Display for System {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            System::Base => write!(f, "base"),
+            System::Enhanced => write!(f, "enhanced"),
+        }
+    }
+}
+
+/// API generation command options
 #[derive(Subcommand)]
 enum Commands {
     /// Generate text using the API
@@ -21,73 +39,119 @@ enum Commands {
         /// The model to use
         #[arg(short, long)]
         model: String,
+
         /// The prompt to generate text from
         #[arg(short, long)]
         prompt: String,
-        /// The system message to set the behavior of the model
-        #[arg(short, long)]
-        system: Option<String>,
-        /// The template to use for generating text
+
+        /// Specify system type
+        #[arg(short, long, value_enum)]
+        system: Option<System>,
+
+        /// Template string
         #[arg(short, long)]
         template: Option<String>,
-        /// The context parameter returned from a previous request
+
+        /// Context as JSON
         #[arg(short, long)]
         context: Option<String>,
-        /// Whether to return the raw response from the model
-        #[arg(short, long)]
+
+        /// Output file to save the context from the API response
+        #[arg(long)]
+        context_out: Option<String>,
+
+        /// Raw output flag
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
         raw: bool,
-        /// The duration to keep the model loaded in memory following the request
-        #[arg(short, long, default_value = "5m")]
-        keep_alive: String,
+
+        /// Keep connection alive
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        keep_alive: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
     match &cli.command {
-        Some(Commands::ApiGenerate {
+        Some(command) => call_api_generate(command).await?,
+        None => println!("No subcommand was used"),
+    }
+
+    Ok(())
+}
+
+async fn call_api_generate(command: &Commands) -> Result<()> {
+    match command {
+        Commands::ApiGenerate {
             model,
             prompt,
             system,
             template,
             context,
+            context_out,
             raw,
             keep_alive,
-        }) => {
+        } => {
             let client = Client::new();
-            let request = client.post("http://localhost:11434/api/generate");
-            let mut json_data = serde_json::json!({
+            let mut payload = json!({
                 "model": model,
                 "prompt": prompt,
             });
+
+            // Optionally add other parameters if they are provided
             if let Some(system) = system {
-                json_data["system"] = serde_json::Value::String(system.clone());
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("system".to_string(), json!(system.to_string()));
             }
             if let Some(template) = template {
-                json_data["template"] = serde_json::Value::String(template.clone());
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("template".to_string(), json!(template));
             }
             if let Some(context) = context {
-                json_data["context"] = serde_json::from_str(context)
-                    .with_context(|| format!("Failed to parse context as JSON: {}", context))?;
+                let context_json: Value = serde_json::from_str(context)
+                    .with_context(|| format!("Failed to parse context JSON: {}", context))?;
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("context".to_string(), context_json);
             }
             if *raw {
-                json_data["raw"] = serde_json::Value::Bool(true);
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("raw".to_string(), json!(true));
             }
-            json_data["keep_alive"] = serde_json::Value::String(keep_alive.clone());
-            let response = request.json(&json_data).send().await?;
+            if *keep_alive {
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("keep_alive".to_string(), json!(true));
+            }
+
+            let response = client
+                .post("http://localhost:11434/api/generate")
+                .json(&payload)
+                .send()
+                .await?;
+
             if response.status().is_success() {
-                let context_value = handle_stream(response).await?;
-                if let Some(context) = context_value {
-                    println!("Context: {}", serde_json::to_string_pretty(&context)?);
+                if let Some(context) = handle_stream(response).await? {
+                    if let Some(context_out) = context_out {
+                        save_context_to_file(&context, context_out)?;
+                    }
                 }
+                return Ok(());
             } else {
-                eprintln!("Received HTTP {}", response.status());
+                return Err(anyhow::anyhow!("Received HTTP {}", response.status()));
             }
         }
-        None => println!("No subcommand was used"),
     }
-    Ok(())
 }
 
 async fn handle_stream(response: Response) -> Result<Option<Value>> {
@@ -97,19 +161,28 @@ async fn handle_stream(response: Response) -> Result<Option<Value>> {
         let bytes = chunk?;
         let text = str::from_utf8(&bytes)
             .with_context(|| format!("Failed to convert bytes to UTF-8 string: {:?}", bytes))?;
-        let json: Value = serde_json::from_str(text)
-            .with_context(|| format!("Failed to parse JSON from string: {}", text))?;
-        if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
-            break; // Indicate completion of the stream
-        }
-        if let Some(response_text) = json["response"].as_str() {
-            print!("{}", response_text);
-            std::io::stdout().flush().unwrap();
-        }
-        if let Some(context) = json.get("context") {
-            context_value = Some(context.clone());
+        match serde_json::from_str::<Value>(text) {
+            Ok(json) => {
+                if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                    context_value = json.get("context").cloned();
+                    break; // Indicate completion of the stream
+                }
+                if let Some(response_text) = json["response"].as_str() {
+                    print!("{}", response_text);
+                    std::io::stdout().flush().unwrap();
+                }
+            }
+            Err(e) => {
+                eprintln!("Error parsing JSON: {}", e);
+            }
         }
     }
     println!(); // Add a newline after the last chunk
     Ok(context_value)
+}
+
+fn save_context_to_file(context: &Value, path: &str) -> Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(context.to_string().as_bytes())?;
+    Ok(())
 }
