@@ -1,26 +1,18 @@
-use reqwest::{Bytes, Client};
-use std::error::Error;
-use tokio;
+// src/main.rs
+use reqwest::Error;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let client = Client::new();
-    let url = "http://localhost:11434/api/generate";
+async fn main() -> Result<(), Error> {
+    let client = reqwest::Client::new();
+    let res = client
+        .post("http://localhost:11434/api/generate")
+        .json(&serde_json::json!({
+            "model": "llama3",
+            "prompt": "Why is the sky blue?"
+        }))
+        .send()
+        .await?;
 
-    let request_body = r#"{
-        "model": "llama2",
-        "prompt": "Why is the sky blue?"
-    }"#;
-
-    let response = client.post(url).body(request_body).send().await?;
-
-    let mut stream = response.chunk();
-
-    while let Some(chunk_result) = stream.next().await {
-        let chunk: Bytes = chunk_result?;
-        let json_str = std::str::from_utf8(&chunk)?;
-        println!("{}", json_str);
-    }
-
+    println!("Status: {}", res.status());
     Ok(())
 }
