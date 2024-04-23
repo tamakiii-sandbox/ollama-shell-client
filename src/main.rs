@@ -30,15 +30,15 @@ enum Commands {
         /// The template to use for generating text
         #[arg(short, long)]
         template: Option<String>,
-        /// The context to provide to the model
+        /// The context parameter returned from a previous request
         #[arg(short, long)]
         context: Option<String>,
         /// Whether to return the raw response from the model
         #[arg(short, long)]
         raw: bool,
-        /// Whether to keep the connection alive for multiple requests
-        #[arg(short, long)]
-        keep_alive: bool,
+        /// The duration to keep the model loaded in memory following the request
+        #[arg(short, long, default_value = "5m")]
+        keep_alive: String,
     },
 }
 
@@ -68,17 +68,19 @@ async fn main() -> Result<()> {
                 json_data["template"] = serde_json::Value::String(template.clone());
             }
             if let Some(context) = context {
-                json_data["context"] = serde_json::Value::String(context.clone());
+                json_data["context"] = serde_json::from_str(context)
+                    .with_context(|| format!("Failed to parse context as JSON: {}", context))?;
             }
             if *raw {
                 json_data["raw"] = serde_json::Value::Bool(true);
             }
-            if *keep_alive {
-                json_data["keep_alive"] = serde_json::Value::Bool(true);
-            }
+            json_data["keep_alive"] = serde_json::Value::String(keep_alive.clone());
             let response = request.json(&json_data).send().await?;
             if response.status().is_success() {
-                handle_stream(response).await?;
+                let context_value = handle_stream(response).await?;
+                if let Some(context) = context_value {
+                    println!("Context: {}", serde_json::to_string_pretty(&context)?);
+                }
             } else {
                 eprintln!("Received HTTP {}", response.status());
             }
@@ -88,9 +90,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_stream(response: Response) -> Result<()> {
+async fn handle_stream(response: Response) -> Result<Option<Value>> {
     let mut stream = response.bytes_stream();
-
+    let mut context_value = None;
     while let Some(chunk) = stream.next().await {
         let bytes = chunk?;
         let text = str::from_utf8(&bytes)
@@ -104,8 +106,10 @@ async fn handle_stream(response: Response) -> Result<()> {
             print!("{}", response_text);
             std::io::stdout().flush().unwrap();
         }
+        if let Some(context) = json.get("context") {
+            context_value = Some(context.clone());
+        }
     }
-
     println!(); // Add a newline after the last chunk
-    Ok(())
+    Ok(context_value)
 }
