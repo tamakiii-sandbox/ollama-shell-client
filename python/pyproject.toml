@@ -7,6 +7,11 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
+ollama = "^0.1.8"
+langchain = "^0.1.16"
+beautifulsoup4 = "^4.12.3"
+chromadb = "^0.4.24"
+gradio = "^4.27.0"
 
 
 [build-system]
