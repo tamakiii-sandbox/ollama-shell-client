@@ -1,6 +1,6 @@
 use futures_util::stream::StreamExt;
 use reqwest::{Client, Error, Response};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::str;
 
 #[tokio::main]
@@ -8,7 +8,7 @@ async fn main() -> Result<(), Error> {
     let client = Client::new();
     let response = client
         .post("http://localhost:11434/api/generate")
-        .json(&json!({
+        .json(&serde_json::json!({
             "model": "llama3",
             "prompt": "Why is the sky blue?"
         }))
@@ -26,26 +26,33 @@ async fn main() -> Result<(), Error> {
 
 async fn handle_stream(response: Response) -> Result<(), Error> {
     let mut stream = response.bytes_stream();
-    let mut final_response = String::new();
+    let mut complete_response = String::new();
 
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(bytes) => {
-                if let Ok(text) = str::from_utf8(&bytes) {
-                    if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                        if let Some(response_text) = json["response"].as_str() {
-                            final_response.push_str(response_text);
-                        }
-                        if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
-                            println!("Final Response: {}", final_response);
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(e) => eprintln!("Stream error: {}", e),
+    while let Some(chunk) = stream.next().await {
+        let text_chunk = process_chunk(chunk)?;
+        if let Some(text) = text_chunk {
+            complete_response.push_str(&text);
+        } else {
+            break;
         }
     }
 
+    println!("Final Response: {}", complete_response);
     Ok(())
+}
+
+/// Processes a single chunk of the response stream, returns the text to append,
+/// or None if the stream is complete.
+fn process_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<Option<String>, Error> {
+    match chunk {
+        Ok(bytes) => {
+            let text = str::from_utf8(&bytes)?;
+            let json: Value = serde_json::from_str(text)?;
+            if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(None); // Indicate completion of the stream
+            }
+            Ok(Some(json["response"].as_str().unwrap_or("").to_string()))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
