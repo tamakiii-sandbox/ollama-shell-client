@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
 }
 
 async fn call_api_generate(command: &Commands) -> Result<()> {
-    if let Commands::ApiGenerate {
+    let Commands::ApiGenerate {
         model,
         prompt,
         system,
@@ -71,78 +71,74 @@ async fn call_api_generate(command: &Commands) -> Result<()> {
         raw,
         keep_alive,
         context_file,
-    } = command
-    {
-        let mut context = None;
+    } = command;
+    let mut context = None;
+    if let Some(file_path) = context_file {
+        if let Ok(file) = File::open(file_path) {
+            let mut buf_reader = BufReader::new(file);
+            let mut contents = String::new();
+            buf_reader.read_to_string(&mut contents)?;
+            context = Some(contents);
+        }
+    }
+
+    let client = Client::new();
+    let mut payload = json!({
+        "model": model,
+        "prompt": prompt,
+    });
+
+    // Optionally add other parameters if they are provided
+    if let Some(system) = system {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("system".to_string(), json!(system));
+    }
+    if let Some(template) = template {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("template".to_string(), json!(template));
+    }
+    if let Some(context) = context {
+        payload["context"] = serde_json::from_str(&context)
+            .with_context(|| format!("Failed to parse context JSON: {}", context))?;
+    }
+    if *raw {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("raw".to_string(), json!(true));
+    }
+    if *keep_alive {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("keep_alive".to_string(), json!(true));
+    }
+
+    let response = client
+        .post("http://localhost:11434/api/generate")
+        .json(&payload)
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let context_value = handle_stream(response).await?;
         if let Some(file_path) = context_file {
-            if let Ok(file) = File::open(file_path) {
-                let mut buf_reader = BufReader::new(file);
-                let mut contents = String::new();
-                buf_reader.read_to_string(&mut contents)?;
-                context = Some(contents);
+            if let Some(context) = context_value {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(file_path)?;
+                file.write_all(serde_json::to_string_pretty(&context)?.as_bytes())?;
             }
         }
-
-        let client = Client::new();
-        let mut payload = json!({
-            "model": model,
-            "prompt": prompt,
-        });
-
-        // Optionally add other parameters if they are provided
-        if let Some(system) = system {
-            payload
-                .as_object_mut()
-                .unwrap()
-                .insert("system".to_string(), json!(system));
-        }
-        if let Some(template) = template {
-            payload
-                .as_object_mut()
-                .unwrap()
-                .insert("template".to_string(), json!(template));
-        }
-        if let Some(context) = context {
-            payload["context"] = serde_json::from_str(&context)
-                .with_context(|| format!("Failed to parse context JSON: {}", context))?;
-        }
-        if *raw {
-            payload
-                .as_object_mut()
-                .unwrap()
-                .insert("raw".to_string(), json!(true));
-        }
-        if *keep_alive {
-            payload
-                .as_object_mut()
-                .unwrap()
-                .insert("keep_alive".to_string(), json!(true));
-        }
-
-        let response = client
-            .post("http://localhost:11434/api/generate")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            let context_value = handle_stream(response).await?;
-            if let Some(file_path) = context_file {
-                if let Some(context) = context_value {
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(file_path)?;
-                    file.write_all(serde_json::to_string_pretty(&context)?.as_bytes())?;
-                }
-            }
-            return Ok(());
-        } else {
-            return Err(anyhow::anyhow!("Received HTTP {}", response.status()));
-        }
+        return Ok(());
     } else {
-        unreachable!("Unexpected command variant");
+        return Err(anyhow::anyhow!("Received HTTP {}", response.status()));
     }
 }
 
