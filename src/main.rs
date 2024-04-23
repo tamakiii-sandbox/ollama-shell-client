@@ -1,4 +1,4 @@
-use reqwest::Client;
+use reqwest::{Bytes, Client};
 use std::error::Error;
 use tokio;
 
@@ -14,10 +14,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let response = client.post(url).body(request_body).send().await?;
 
-    let mut stream = response.bytes_stream();
+    let mut stream = response.chunk();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk: Bytes = chunk_result?;
         let json_str = std::str::from_utf8(&chunk)?;
         println!("{}", json_str);
     }
