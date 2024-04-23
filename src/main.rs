@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::stream::StreamExt;
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
-use std::fs::File;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read, Write};
 use std::str;
 
 /// A simple CLI tool to interact with an API
@@ -52,14 +52,6 @@ enum Commands {
         #[arg(short, long)]
         template: Option<String>,
 
-        /// Context as JSON
-        #[arg(short, long)]
-        context: Option<String>,
-
-        /// Output file to save the context from the API response
-        #[arg(long)]
-        context_out: Option<String>,
-
         /// Raw output flag
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
         raw: bool,
@@ -67,6 +59,10 @@ enum Commands {
         /// Keep connection alive
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
         keep_alive: bool,
+
+        /// File to read/write context JSON
+        #[arg(long)]
+        context_file: Option<String>,
     },
 }
 
@@ -89,11 +85,20 @@ async fn call_api_generate(command: &Commands) -> Result<()> {
             prompt,
             system,
             template,
-            context,
-            context_out,
             raw,
             keep_alive,
+            context_file,
         } => {
+            let mut context = None;
+            if let Some(file_path) = context_file {
+                if let Ok(file) = File::open(file_path) {
+                    let mut buf_reader = BufReader::new(file);
+                    let mut contents = String::new();
+                    buf_reader.read_to_string(&mut contents)?;
+                    context = Some(contents);
+                }
+            }
+
             let client = Client::new();
             let mut payload = json!({
                 "model": model,
@@ -114,12 +119,8 @@ async fn call_api_generate(command: &Commands) -> Result<()> {
                     .insert("template".to_string(), json!(template));
             }
             if let Some(context) = context {
-                let context_json: Value = serde_json::from_str(context)
+                payload["context"] = serde_json::from_str(&context)
                     .with_context(|| format!("Failed to parse context JSON: {}", context))?;
-                payload
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("context".to_string(), context_json);
             }
             if *raw {
                 payload
@@ -141,9 +142,15 @@ async fn call_api_generate(command: &Commands) -> Result<()> {
                 .await?;
 
             if response.status().is_success() {
-                if let Some(context) = handle_stream(response).await? {
-                    if let Some(context_out) = context_out {
-                        save_context_to_file(&context, context_out)?;
+                let context_value = handle_stream(response).await?;
+                if let Some(file_path) = context_file {
+                    if let Some(context) = context_value {
+                        let mut file = OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(file_path)?;
+                        file.write_all(serde_json::to_string_pretty(&context)?.as_bytes())?;
                     }
                 }
                 return Ok(());
@@ -179,10 +186,4 @@ async fn handle_stream(response: Response) -> Result<Option<Value>> {
     }
     println!(); // Add a newline after the last chunk
     Ok(context_value)
-}
-
-fn save_context_to_file(context: &Value, path: &str) -> Result<()> {
-    let mut file = File::create(path)?;
-    file.write_all(context.to_string().as_bytes())?;
-    Ok(())
 }
