@@ -29,7 +29,7 @@ async fn handle_stream(response: Response) -> Result<(), Error> {
     let mut complete_response = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let text_chunk = process_chunk(chunk)?;
+        let text_chunk = process_chunk(chunk).unwrap();
         if let Some(text) = text_chunk {
             complete_response.push_str(&text);
         } else {
@@ -43,7 +43,9 @@ async fn handle_stream(response: Response) -> Result<(), Error> {
 
 /// Processes a single chunk of the response stream, returns the text to append,
 /// or None if the stream is complete.
-fn process_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<Option<String>, Error> {
+fn process_chunk(
+    chunk: Result<bytes::Bytes, Error>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     match chunk {
         Ok(bytes) => {
             let text = str::from_utf8(&bytes)?;
@@ -53,6 +55,6 @@ fn process_chunk(chunk: Result<bytes::Bytes, reqwest::Error>) -> Result<Option<S
             }
             Ok(Some(json["response"].as_str().unwrap_or("").to_string()))
         }
-        Err(e) => Err(e.into()),
+        Err(e) => Err(Box::new(e)),
     }
 }
