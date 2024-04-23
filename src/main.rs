@@ -79,108 +79,154 @@ async fn main() -> Result<()> {
 }
 
 async fn call_api_generate(command: &Commands) -> Result<()> {
-    match command {
-        Commands::ApiGenerate {
-            model,
-            prompt,
-            system,
-            template,
-            raw,
-            keep_alive,
-            context_file,
-        } => {
-            let mut context = None;
-            if let Some(file_path) = context_file {
-                if let Ok(file) = File::open(file_path) {
-                    let mut buf_reader = BufReader::new(file);
-                    let mut contents = String::new();
-                    buf_reader.read_to_string(&mut contents)?;
-                    context = Some(contents);
-                }
-            }
-
-            let client = Client::new();
-            let mut payload = json!({
-                "model": model,
-                "prompt": prompt,
-            });
-
-            // Optionally add other parameters if they are provided
-            if let Some(system) = system {
-                payload
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("system".to_string(), json!(system.to_string()));
-            }
-            if let Some(template) = template {
-                payload
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("template".to_string(), json!(template));
-            }
-            if let Some(context) = context {
-                payload["context"] = serde_json::from_str(&context)
-                    .with_context(|| format!("Failed to parse context JSON: {}", context))?;
-            }
-            if *raw {
-                payload
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("raw".to_string(), json!(true));
-            }
-            if *keep_alive {
-                payload
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("keep_alive".to_string(), json!(true));
-            }
-
-            let response = client
-                .post("http://localhost:11434/api/generate")
-                .json(&payload)
-                .send()
-                .await?;
-
-            if response.status().is_success() {
-                let context_value = handle_stream(response).await?;
-                if let Some(file_path) = context_file {
-                    if let Some(context) = context_value {
-                        let mut file = OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .open(file_path)?;
-                        file.write_all(serde_json::to_string_pretty(&context)?.as_bytes())?;
-                    }
-                }
-                return Ok(());
-            } else {
-                return Err(anyhow::anyhow!("Received HTTP {}", response.status()));
+    if let Commands::ApiGenerate {
+        model,
+        prompt,
+        system,
+        template,
+        raw,
+        keep_alive,
+        context_file,
+    } = command
+    {
+        let mut context = None;
+        if let Some(file_path) = context_file {
+            if let Ok(file) = File::open(file_path) {
+                let mut buf_reader = BufReader::new(file);
+                let mut contents = String::new();
+                buf_reader.read_to_string(&mut contents)?;
+                context = Some(contents);
             }
         }
+
+        let client = Client::new();
+        let mut payload = json!({
+            "model": model,
+            "prompt": prompt,
+        });
+
+        // Optionally add other parameters if they are provided
+        if let Some(system) = system {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("system".to_string(), json!(system.to_string()));
+        }
+        if let Some(template) = template {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("template".to_string(), json!(template));
+        }
+        if let Some(context) = context {
+            payload["context"] = serde_json::from_str(&context)
+                .with_context(|| format!("Failed to parse context JSON: {}", context))?;
+        }
+        if *raw {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("raw".to_string(), json!(true));
+        }
+        if *keep_alive {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("keep_alive".to_string(), json!(true));
+        }
+
+        let response = client
+            .post("http://localhost:11434/api/generate")
+            .json(&payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let context_value = handle_stream(response).await?;
+            if let Some(file_path) = context_file {
+                if let Some(context) = context_value {
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(file_path)?;
+                    file.write_all(serde_json::to_string_pretty(&context)?.as_bytes())?;
+                }
+            }
+            return Ok(());
+        } else {
+            return Err(anyhow::anyhow!("Received HTTP {}", response.status()));
+        }
+    } else {
+        unreachable!("Unexpected command variant");
     }
 }
+
+// async fn handle_stream(response: Response) -> Result<Option<Value>> {
+//     let mut stream = response.bytes_stream();
+//     let mut context_value = None;
+//     while let Some(chunk) = stream.next().await {
+//         let bytes = chunk?;
+//         let text = str::from_utf8(&bytes)
+//             .with_context(|| format!("Failed to convert bytes to UTF-8 string: {:?}", bytes))?;
+//         match serde_json::from_str::<Value>(text) {
+//             Ok(json) => {
+//                 if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
+//                     context_value = json.get("context").cloned();
+//                     break; // Indicate completion of the stream
+//                 }
+//                 if let Some(response_text) = json["response"].as_str() {
+//                     print!("{}", response_text);
+//                     std::io::stdout().flush().unwrap();
+//                 }
+//             }
+//             Err(e) => {
+//                 eprintln!("Error parsing JSON: {}", e);
+//                 eprintln!("Problematic JSON text: {}", text);
+//             }
+//         }
+//     }
+//     println!(); // Add a newline after the last chunk
+//     Ok(context_value)
+// }
 
 async fn handle_stream(response: Response) -> Result<Option<Value>> {
     let mut stream = response.bytes_stream();
     let mut context_value = None;
+    let mut json_buffer = String::new();
+
     while let Some(chunk) = stream.next().await {
         let bytes = chunk?;
         let text = str::from_utf8(&bytes)
             .with_context(|| format!("Failed to convert bytes to UTF-8 string: {:?}", bytes))?;
-        match serde_json::from_str::<Value>(text) {
-            Ok(json) => {
-                if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
-                    context_value = json.get("context").cloned();
-                    break; // Indicate completion of the stream
+
+        json_buffer.push_str(text);
+
+        loop {
+            match serde_json::from_str::<Value>(&json_buffer) {
+                Ok(json) => {
+                    if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                        context_value = json.get("context").cloned();
+                        break; // Indicate completion of the stream
+                    }
+                    if let Some(response_text) = json["response"].as_str() {
+                        print!("{}", response_text);
+                        std::io::stdout().flush().unwrap();
+                    }
+                    json_buffer.clear();
                 }
-                if let Some(response_text) = json["response"].as_str() {
-                    print!("{}", response_text);
-                    std::io::stdout().flush().unwrap();
+                Err(e) => {
+                    if e.is_eof() {
+                        // Incomplete JSON, continue accumulating chunks
+                        break;
+                    } else {
+                        // Invalid JSON, print the error and clear the buffer
+                        eprintln!("Error parsing JSON: {}", e);
+                        eprintln!("Problematic JSON text: {}", json_buffer);
+                        json_buffer.clear();
+                        break;
+                    }
                 }
-            }
-            Err(e) => {
-                eprintln!("Error parsing JSON: {}", e);
             }
         }
     }
