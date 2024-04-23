@@ -1,28 +1,40 @@
-// src/main.rs
-use reqwest::Error;
-use serde_json::json; // Ensure we use the JSON macro for easy payload construction
+use futures_util::stream::StreamExt; // Correct import for StreamExt
+use reqwest::{Client, Error, Response}; // Use Bytes, a more appropriate type for handling byte arrays
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Create an instance of the client
-    let client = reqwest::Client::new();
-
-    // Prepare the POST request with the JSON payload
+    let client = Client::new();
     let response = client
         .post("http://localhost:11434/api/generate")
-        .json(&json!({
+        .json(&serde_json::json!({
             "model": "llama3",
             "prompt": "Why is the sky blue?"
         }))
         .send()
         .await?;
 
-    // Print the HTTP status of the response
-    println!("Status: {}", response.status());
+    if response.status().is_success() {
+        handle_stream(response).await?;
+    } else {
+        eprintln!("Received HTTP {}", response.status());
+    }
 
-    // Optionally, we could check and print the response body here:
-    // let body = response.text().await?;
-    // println!("Body: {}", body);
+    Ok(())
+}
+
+async fn handle_stream(response: Response) -> Result<(), Error> {
+    let mut stream = response.bytes_stream();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(bytes) => {
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    println!("Chunk: {}", text);
+                }
+            }
+            Err(e) => eprintln!("Stream error: {}", e),
+        }
+    }
 
     Ok(())
 }
