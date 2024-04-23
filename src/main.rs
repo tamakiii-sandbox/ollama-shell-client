@@ -21,29 +21,62 @@ enum Commands {
         /// The model to use
         #[arg(short, long)]
         model: String,
-
         /// The prompt to generate text from
         #[arg(short, long)]
         prompt: String,
+        /// The system message to set the behavior of the model
+        #[arg(short, long)]
+        system: Option<String>,
+        /// The template to use for generating text
+        #[arg(short, long)]
+        template: Option<String>,
+        /// The context to provide to the model
+        #[arg(short, long)]
+        context: Option<String>,
+        /// Whether to return the raw response from the model
+        #[arg(short, long)]
+        raw: bool,
+        /// Whether to keep the connection alive for multiple requests
+        #[arg(short, long)]
+        keep_alive: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-
     match &cli.command {
-        Some(Commands::ApiGenerate { model, prompt }) => {
+        Some(Commands::ApiGenerate {
+            model,
+            prompt,
+            system,
+            template,
+            context,
+            raw,
+            keep_alive,
+        }) => {
             let client = Client::new();
-            let response = client
-                .post("http://localhost:11434/api/generate")
-                .json(&serde_json::json!({
-                    "model": model,
-                    "prompt": prompt
-                }))
-                .send()
-                .await?;
-
+            let request = client.post("http://localhost:11434/api/generate");
+            let mut json_data = serde_json::json!({
+                "model": model,
+                "prompt": prompt,
+            });
+            if let Some(system) = system {
+                json_data["system"] = serde_json::Value::String(system.clone());
+            }
+            if let Some(template) = template {
+                json_data["template"] = serde_json::Value::String(template.clone());
+            }
+            if let Some(context) = context {
+                json_data["context"] = serde_json::Value::String(context.clone());
+            }
+            if *raw {
+                json_data["raw"] = serde_json::Value::Bool(true);
+            }
+            if *keep_alive {
+                json_data["keep_alive"] = serde_json::Value::Bool(true);
+            }
+            let response = request.json(&json_data).send().await?;
             if response.status().is_success() {
                 handle_stream(response).await?;
             } else {
@@ -52,7 +85,6 @@ async fn main() -> Result<()> {
         }
         None => println!("No subcommand was used"),
     }
-
     Ok(())
 }
 
