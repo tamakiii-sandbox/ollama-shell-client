@@ -1,26 +1,56 @@
 use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 use futures_util::stream::StreamExt;
 use reqwest::{Client, Response};
 use serde_json::Value;
 use std::io::Write;
 use std::str;
 
+/// A simple CLI tool to interact with an API
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate text using the API
+    ApiGenerate {
+        /// The model to use
+        #[arg(short, long)]
+        model: String,
+
+        /// The prompt to generate text from
+        #[arg(short, long)]
+        prompt: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = Client::new();
-    let response = client
-        .post("http://localhost:11434/api/generate")
-        .json(&serde_json::json!({
-            "model": "llama3",
-            "prompt": "Why is the sky blue?"
-        }))
-        .send()
-        .await?;
+    let cli = Cli::parse();
 
-    if response.status().is_success() {
-        handle_stream(response).await?;
-    } else {
-        eprintln!("Received HTTP {}", response.status());
+    match &cli.command {
+        Some(Commands::ApiGenerate { model, prompt }) => {
+            let client = Client::new();
+            let response = client
+                .post("http://localhost:11434/api/generate")
+                .json(&serde_json::json!({
+                    "model": model,
+                    "prompt": prompt
+                }))
+                .send()
+                .await?;
+
+            if response.status().is_success() {
+                handle_stream(response).await?;
+            } else {
+                eprintln!("Received HTTP {}", response.status());
+            }
+        }
+        None => println!("No subcommand was used"),
     }
 
     Ok(())
