@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use futures_util::stream::StreamExt;
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
@@ -15,22 +15,6 @@ struct Cli {
     command: Option<Commands>,
 }
 
-/// Supported system types
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum System {
-    Base,
-    Enhanced,
-}
-
-impl std::fmt::Display for System {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            System::Base => write!(f, "base"),
-            System::Enhanced => write!(f, "enhanced"),
-        }
-    }
-}
-
 /// API generation command options
 #[derive(Subcommand)]
 enum Commands {
@@ -44,9 +28,9 @@ enum Commands {
         #[arg(short, long)]
         prompt: String,
 
-        /// Specify system type
-        #[arg(short, long, value_enum)]
-        system: Option<System>,
+        /// The system message to set the behavior of the model
+        #[arg(short, long)]
+        system: Option<String>,
 
         /// Template string
         #[arg(short, long)]
@@ -110,7 +94,7 @@ async fn call_api_generate(command: &Commands) -> Result<()> {
             payload
                 .as_object_mut()
                 .unwrap()
-                .insert("system".to_string(), json!(system.to_string()));
+                .insert("system".to_string(), json!(system));
         }
         if let Some(template) = template {
             payload
@@ -161,34 +145,6 @@ async fn call_api_generate(command: &Commands) -> Result<()> {
         unreachable!("Unexpected command variant");
     }
 }
-
-// async fn handle_stream(response: Response) -> Result<Option<Value>> {
-//     let mut stream = response.bytes_stream();
-//     let mut context_value = None;
-//     while let Some(chunk) = stream.next().await {
-//         let bytes = chunk?;
-//         let text = str::from_utf8(&bytes)
-//             .with_context(|| format!("Failed to convert bytes to UTF-8 string: {:?}", bytes))?;
-//         match serde_json::from_str::<Value>(text) {
-//             Ok(json) => {
-//                 if json.get("done").and_then(Value::as_bool).unwrap_or(false) {
-//                     context_value = json.get("context").cloned();
-//                     break; // Indicate completion of the stream
-//                 }
-//                 if let Some(response_text) = json["response"].as_str() {
-//                     print!("{}", response_text);
-//                     std::io::stdout().flush().unwrap();
-//                 }
-//             }
-//             Err(e) => {
-//                 eprintln!("Error parsing JSON: {}", e);
-//                 eprintln!("Problematic JSON text: {}", text);
-//             }
-//         }
-//     }
-//     println!(); // Add a newline after the last chunk
-//     Ok(context_value)
-// }
 
 async fn handle_stream(response: Response) -> Result<Option<Value>> {
     let mut stream = response.bytes_stream();
